@@ -34,7 +34,7 @@
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root, [data-theme="dark"]{
@@ -63,7 +63,7 @@
     --radius-m: 14px;
     --radius-l: 22px;
     --serif: 'Fraunces', Georgia, serif;
-    --sans: 'Manrope', system-ui, sans-serif;
+    --sans: 'Inter', system-ui, sans-serif;
     --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
     --ledger-rule: rgba(180,175,220,0.05);
     --ease-out: cubic-bezier(.16,1,.3,1);
@@ -745,6 +745,21 @@
   .doubt-typing i:nth-child(2){ animation-delay: 0.15s; }
   .doubt-typing i:nth-child(3){ animation-delay: 0.3s; }
   @keyframes doubtTypingBounce{ 0%,60%,100%{ transform: translateY(0); opacity:0.5; } 30%{ transform: translateY(-4px); opacity:1; } }
+  /* Blinking cursor shown at the end of an AI answer while it's still
+     being typed out (see typewriterReveal in JS). The attribute is set
+     by JS only for the duration of the animation and removed once
+     done, so the cursor never lingers on a finished, previously-typed
+     reply. */
+  .doubt-bubble .acp-body[data-typewriter="1"]::after{
+    content: '';
+    display: inline-block;
+    width: 2px; height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--section-accent, var(--accent));
+    animation: doubtCursorBlink 0.9s step-start infinite;
+  }
+  @keyframes doubtCursorBlink{ 50%{ opacity: 0; } }
   .doubt-retry-status{ font-size:12px; color: var(--text-faint); margin-top:6px; }
   .doubt-error-bubble{ color: var(--danger); font-size: 13.5px; }
 
@@ -2428,9 +2443,21 @@
   @keyframes progShimmer{ 0%{ transform: translateX(-120%); } 100%{ transform: translateX(340%); } }
 
   .section-icon{ position: relative; }
+  /* The glow behind each section icon must match that icon's own tint
+     (teal for Study/Doubt, amber for Discipline/Notes, purple for
+     Flashcards/AI, blue for Month/Calendar, etc.) — each .section-icon
+     instance already sets its correct color via an inline style, but
+     this pseudo-element used to source its color from --section-soft,
+     a variable that's only ever set by [data-section="..."] selectors
+     that nothing in the markup actually applies. It silently fell back
+     to the root default (amber) everywhere, so on every non-amber
+     screen the breathing glow was the wrong color behind the icon —
+     visible as a mismatched-color edge where the two overlap. Using
+     `background: inherit` instead picks up the actual background the
+     icon tile was given, so the glow always matches. */
   .section-icon::after{
     content:''; position:absolute; inset:-6px; border-radius: inherit; z-index:-1;
-    background: var(--section-soft, var(--amber-soft));
+    background: inherit;
     animation: iconBreathe 3.2s ease-in-out infinite;
   }
   @keyframes iconBreathe{ 0%,100%{ opacity:0.4; transform: scale(0.94); } 50%{ opacity:0.9; transform: scale(1.08); } }
@@ -6040,15 +6067,108 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
     const savedLabel = msg.savedFlashcardId
       ? `${ICONS.check} Saved`
       : `${ICONS.layers} Save as flashcard`;
+    // Freshly-completed answers get a typewriter reveal (see
+    // typewriterReveal below) instead of popping in fully-formed, which
+    // reads as much more "alive" for a Doubt-chat reply. Once a message
+    // has been typed out once (msg._typed) we skip the animation on
+    // every future re-render — renderDoubtMessages rebuilds the whole
+    // list on each send, so without this flag older answers would
+    // replay their typing animation every single time.
+    const needsTypewriter = !msg._typed && !reducedMotionPreferred();
+    const bodyAttr = needsTypewriter ? ' data-typewriter="1"' : '';
     return `<div class="doubt-msg ai">
       <div class="doubt-bubble">
-        <div class="acp-body">${renderAiReply(msg.content)}</div>
+        <div class="acp-body"${bodyAttr}>${needsTypewriter ? '' : renderAiReply(msg.content)}</div>
         <div class="doubt-msg-actions">
           <button type="button" class="doubt-save-fc-btn${msg.savedFlashcardId ? ' saved' : ''}" data-idx="${idx}" ${msg.savedFlashcardId ? 'disabled' : ''}>${savedLabel}</button>
           <button type="button" class="doubt-regen-btn" data-idx="${idx}" title="Regenerate answer">${ICONS.history} Regenerate</button>
         </div>
       </div>
     </div>`;
+  }
+
+  // Whether the OS-level "reduce motion" accessibility setting is on —
+  // when it is, we skip the typewriter animation and show AI replies
+  // instantly, same as any other motion effect in the app should.
+  function reducedMotionPreferred(){
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  // Reveals `html` inside `el` character-by-character, like a chat
+  // message being typed live, instead of the full answer appearing all
+  // at once. The full markup is parsed into a detached DOM fragment up
+  // front (so **bold**/lists/etc. are already correctly structured — we
+  // never slice raw HTML strings, which could cut a tag in half), then
+  // cloned into the live element with every text node emptied. From
+  // there we just grow each text node's revealed length over time, so
+  // the tag structure (and thus layout) is correct from frame one and
+  // we're only ever mutating text content, never re-parsing HTML.
+  function typewriterReveal(el, html, onDone){
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const sourceRoot = template.content;
+
+    // Build the live DOM now, with every text node present but empty —
+    // clone() below walks source and destination together so the two
+    // trees stay in lockstep.
+    el.innerHTML = '';
+    const chars = []; // flat list of { node, ch } in document order
+
+    function clone(srcNode, destParent){
+      srcNode.childNodes.forEach(srcChild => {
+        if(srcChild.nodeType === Node.TEXT_NODE){
+          const liveText = document.createTextNode('');
+          destParent.appendChild(liveText);
+          for(const ch of srcChild.textContent){
+            chars.push({ node: liveText, ch });
+          }
+        } else if(srcChild.nodeType === Node.ELEMENT_NODE){
+          const liveEl = srcChild.cloneNode(false);
+          destParent.appendChild(liveEl);
+          clone(srcChild, liveEl);
+        }
+      });
+    }
+    clone(sourceRoot, el);
+
+    if(!chars.length){ if(onDone) onDone(); return; }
+
+    // Reveal a handful of characters per animation frame rather than
+    // one-per-frame — one-at-a-time is too slow for a multi-paragraph
+    // answer, and choppy on faster refresh-rate screens. ~2 chars per
+    // ~16ms frame lands around a natural, quick "someone typing" feel
+    // without making the person wait on a long reply.
+    const CHARS_PER_FRAME = 2;
+    let i = 0;
+    let rafId = null;
+    function step(){
+      const end = Math.min(chars.length, i + CHARS_PER_FRAME);
+      for(; i < end; i++){
+        chars[i].node.textContent += chars[i].ch;
+      }
+      // Keep the chat pinned to the newest text as it grows, matching
+      // the auto-scroll behavior every other message send already has.
+      const scrollEl = document.getElementById('doubtScroll');
+      if(scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+      if(i < chars.length){
+        rafId = requestAnimationFrame(step);
+      } else if(onDone){
+        onDone();
+      }
+    }
+    rafId = requestAnimationFrame(step);
+
+    // If the person navigates away from Doubt mid-animation, the target
+    // element gets removed from the DOM by the next renderDoubtMessages
+    // call — stop the rAF loop rather than continuing to touch a
+    // detached node.
+    const observer = new MutationObserver(() => {
+      if(!document.body.contains(el)){
+        if(rafId) cancelAnimationFrame(rafId);
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.getElementById('doubtScroll') || document.body, { childList: true, subtree: true });
   }
 
   function renderDoubtMessages(){
@@ -6069,6 +6189,18 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
     });
     scrollEl.querySelectorAll('.doubt-regen-btn').forEach(btn => {
       btn.onclick = () => regenerateDoubtAnswer(Number(btn.dataset.idx));
+    });
+    // Run the typewriter reveal on any freshly-completed answer bubble
+    // (see doubtBubbleHtml — it leaves .acp-body empty and flags it
+    // with data-typewriter for exactly this). Matched back to its
+    // message by array position, since doubtMessages and the rendered
+    // .doubt-msg elements are always in the same order.
+    const aiMsgIndices = [];
+    doubtMessages.forEach((m,i) => { if(m.role === 'assistant' && !m.pending && !m.error) aiMsgIndices.push(i); });
+    scrollEl.querySelectorAll('.acp-body[data-typewriter="1"]').forEach((bodyEl, order) => {
+      const msg = doubtMessages[aiMsgIndices[order]];
+      if(!msg) return;
+      typewriterReveal(bodyEl, renderAiReply(msg.content), () => { msg._typed = true; bodyEl.removeAttribute('data-typewriter'); });
     });
   }
 
@@ -6992,7 +7124,7 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
   function buildShareCardStandaloneHtml(d){
     const discHex = { strong:'#2FD98A', mixed:'#F2617A', rough:'#FF5566' }[d.discInfo.cls] || '#A6ACC7';
     return `
-    <div id="shareCardStandalone" style="width:420px;padding:26px 24px 22px;background:linear-gradient(160deg,#12162A,#171C33);border:1px solid #262C48;border-radius:16px;font-family:'Manrope',system-ui,sans-serif;color:#F1F3FA;position:relative;">
+    <div id="shareCardStandalone" style="width:420px;padding:26px 24px 22px;background:linear-gradient(160deg,#12162A,#171C33);border:1px solid #262C48;border-radius:16px;font-family:'Inter',system-ui,sans-serif;color:#F1F3FA;position:relative;">
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:18px;">
         <div style="width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#F2617A,#2FD98A);position:relative;flex-shrink:0;">
           <div style="position:absolute;inset:2px;border-radius:6px;background:#171C33;"></div>
@@ -7127,7 +7259,7 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
     }).join('');
 
     return `
-    <div id="weeklyReportSheet" style="width:820px;padding:56px;background:#0B0E1A;color:#F1F3FA;font-family:'Manrope',system-ui,sans-serif;position:relative;">
+    <div id="weeklyReportSheet" style="width:820px;padding:56px;background:#0B0E1A;color:#F1F3FA;font-family:'Inter',system-ui,sans-serif;position:relative;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;">
         <div style="display:flex;align-items:center;gap:12px;">
           <div style="width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,#F2617A,#2FD98A);position:relative;">
@@ -7453,7 +7585,7 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
       c.beginPath(); c.arc(x,y,3.5,0,Math.PI*2); c.fill();
     });
     c.fillStyle = isLight ? '#8B8FA8' : '#6B7295';
-    c.font = '10px "Manrope", sans-serif';
+    c.font = '10px "Inter", sans-serif';
     c.textAlign = 'right';
     for(let i=0;i<=4;i++){
       const val = Math.round(maxV - maxV*i/4);
@@ -7656,10 +7788,10 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
   }
 
   // Accordion config for the settings screen: one entry per top-level
-  // settings-section, in document order. `key` ties a jump-nav pill to
-  // its card; `icon`/`title` build the card header; `preview(s)` returns
-  // a short live summary shown next to the title when the card is
-  // collapsed, so the person can scan state without opening every card.
+  // settings-section, in document order. `key` identifies each card;
+  // `icon`/`title` build the card header; `preview(s)` returns a short
+  // live summary shown next to the title when the card is collapsed, so
+  // the person can scan state without opening every card.
   // Personal info fields shown in Settings → Personal information. Each is
   // saved once into `settings.profile` and then locked (read-only, greyed
   // out) — matches how a real intake form works, and keeps the AI Coach
@@ -9886,7 +10018,7 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
     document.body.innerHTML = `
       <div style="min-height:100vh;background:var(--ink);padding:28px 18px 60px;">
         <div id="mentorViewRoot" style="max-width:720px;margin:0 auto;">
-          <div style="text-align:center;padding:80px 0;color:var(--text-faint);font-family:var(--sans, 'Manrope', sans-serif);">Loading report…</div>
+          <div style="text-align:center;padding:80px 0;color:var(--text-faint);font-family:var(--sans, 'Inter', sans-serif);">Loading report…</div>
         </div>
       </div>`;
     const root = document.getElementById('mentorViewRoot');
@@ -10032,7 +10164,7 @@ button svg, .btn svg, .copy-btn svg, .ai-coach-btn svg,
         <div style="text-align:center;margin-top:30px;padding-top:18px;border-top:1px solid var(--border-soft);font-size:11.5px;color:var(--text-faint);font-style:italic;">This link is read-only and cannot edit or view PIN/account data.</div>
       `;
     }catch(err){
-      root.innerHTML = `<div style="text-align:center;padding:80px 20px;color:var(--text-dim);font-family:var(--sans, 'Manrope', sans-serif);">
+      root.innerHTML = `<div style="text-align:center;padding:80px 20px;color:var(--text-dim);font-family:var(--sans, 'Inter', sans-serif);">
         <div style="font-size:16px;font-weight:800;color:var(--danger);margin-bottom:10px;">Link not available</div>
         <div style="font-size:13.5px;">${escapeHtml(err.message || 'This link is invalid or has been revoked.')}</div>
       </div>`;
